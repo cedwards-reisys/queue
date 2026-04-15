@@ -1,0 +1,42 @@
+{{- if and .Values.broker.tls.enabled .Values.broker.tls.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "artemis.fullname" . }}-tls
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  secretName: {{ include "artemis.fullname" . }}-tls
+  duration: {{ .Values.broker.tls.certManager.duration }}
+  renewBefore: {{ .Values.broker.tls.certManager.renewBefore }}
+  issuerRef:
+    name: {{ .Values.broker.tls.certManager.issuerRef.name }}
+    kind: {{ .Values.broker.tls.certManager.issuerRef.kind }}
+  commonName: {{ include "artemis.fullname" . }}
+  dnsNames:
+    {{- $fullname := include "artemis.fullname" . }}
+    {{- $ns := .Release.Namespace }}
+    {{- $maxLive := int .Values.broker.replicas.live }}
+    {{- $maxBackup := int .Values.broker.replicas.backup }}
+    # Live broker headless DNS names
+    {{- range $i := until $maxLive }}
+    - {{ $fullname }}-live-{{ $i }}.{{ $fullname }}-live-headless.{{ $ns }}.svc.cluster.local
+    {{- end }}
+    {{- if .Values.broker.ha.enabled }}
+    # Backup broker headless DNS names
+    {{- range $i := until $maxBackup }}
+    - {{ $fullname }}-backup-{{ $i }}.{{ $fullname }}-backup-headless.{{ $ns }}.svc.cluster.local
+    {{- end }}
+    {{- end }}
+    # Service DNS names
+    - {{ $fullname }}-live.{{ $ns }}.svc.cluster.local
+    - {{ $fullname }}-live-headless.{{ $ns }}.svc.cluster.local
+    {{- if .Values.broker.ha.enabled }}
+    - {{ $fullname }}-backup-headless.{{ $ns }}.svc.cluster.local
+    {{- end }}
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+{{- end }}

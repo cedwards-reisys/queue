@@ -1,0 +1,6 @@
+apiVersion: v2
+name: artemis
+description: ActiveMQ Artemis clustered broker with replication HA for EKS
+type: application
+version: 0.1.0
+appVersion: "2.53.0"

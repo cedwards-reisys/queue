@@ -1,0 +1,233 @@
+services:
+  # ---------- PostgreSQL (JDBC store for Classic) ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: activemq
+      POSTGRES_USER: activemq
+      POSTGRES_PASSWORD: activemq
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U activemq -d activemq"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - broker-net
+
+  # ---------- ActiveMQ Classic + PostgreSQL JDBC (mirrors production) ----------
+  classic-jdbc-broker:
+    build:
+      context: ./classic-jdbc
+      dockerfile: Dockerfile
+    container_name: classic-jdbc-broker
+    ports:
+      - "61618:61616"   # OpenWire (mapped to 61618 on host)
+      - "8163:8161"     # Web console
+    environment:
+      ACTIVEMQ_OPTS: >-
+        -Xmx512m -Xms256m
+        -Dpg.host=postgres
+        -Dpg.port=5432
+        -Dpg.db=activemq
+        -Dpg.user=activemq
+        -Dpg.password=activemq
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/61616' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    networks:
+      - broker-net
+
+  # ---------- ActiveMQ Classic 5.18 (KahaDB — tuned store) ----------
+  classic-broker:
+    build:
+      context: ./classic-kahadb
+      dockerfile: Dockerfile
+    container_name: classic-broker
+    ports:
+      - "61616:61616"   # OpenWire
+      - "8161:8161"     # Web console
+    environment:
+      ACTIVEMQ_OPTS: >-
+        -Xmx512m -Xms256m
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/61616' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+    networks:
+      - broker-net
+
+  # ---------- ActiveMQ Artemis (migration target) ----------
+  artemis-broker:
+    image: apache/activemq-artemis:latest
+    container_name: artemis-broker
+    ports:
+      - "61617:61616"   # OpenWire (mapped to 61617 on host to avoid conflict)
+      - "8162:8161"     # Web console
+    volumes:
+      - ./artemis-config/broker.xml:/var/lib/artemis-instance/etc-override/broker.xml:ro
+    environment:
+      ARTEMIS_USER: admin
+      ARTEMIS_PASSWORD: admin
+      EXTRA_ARGS: "--nio"
+    healthcheck:
+      test: ["CMD-SHELL", "/var/lib/artemis-instance/bin/artemis check node --url tcp://localhost:61616 --user admin --password admin 2>/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - broker-net
+
+  # ---------- Monolith sim → Classic (OpenWire, Java 8) ----------
+  monolith-classic:
+    build:
+      context: ./monolith-sim
+      dockerfile: Dockerfile
+    container_name: monolith-classic
+    ports:
+      - "8081:8081"
+    environment:
+      BROKER_URL: "failover:(tcp://classic-broker:61616)?maxReconnectAttempts=10&reconnectDelay=1000"
+      BROKER_USER: admin
+      BROKER_PASSWORD: admin
+      QUEUE_PREFIX: test.monolith.classic
+      PREFETCH_SIZE: 50
+    depends_on:
+      classic-broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/test/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks:
+      - broker-net
+
+  # ---------- Monolith sim → Classic JDBC (OpenWire, Java 8, PostgreSQL backend) ----------
+  monolith-classic-jdbc:
+    build:
+      context: ./monolith-sim
+      dockerfile: Dockerfile
+    container_name: monolith-classic-jdbc
+    ports:
+      - "8084:8081"
+    environment:
+      BROKER_URL: "failover:(tcp://classic-jdbc-broker:61616)?maxReconnectAttempts=10&reconnectDelay=1000"
+      BROKER_USER: admin
+      BROKER_PASSWORD: admin
+      QUEUE_PREFIX: test.monolith.jdbc
+      PREFETCH_SIZE: 50
+    depends_on:
+      classic-jdbc-broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/test/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks:
+      - broker-net
+
+  # ---------- Monolith sim → Artemis (OpenWire compat, Java 8) ----------
+  monolith-artemis:
+    build:
+      context: ./monolith-sim
+      dockerfile: Dockerfile
+    container_name: monolith-artemis
+    ports:
+      - "8083:8081"
+    environment:
+      BROKER_URL: "failover:(tcp://artemis-broker:61616)?maxReconnectAttempts=10&reconnectDelay=1000"
+      BROKER_USER: admin
+      BROKER_PASSWORD: admin
+      QUEUE_PREFIX: test.monolith.artemis
+      PREFETCH_SIZE: 50
+    depends_on:
+      artemis-broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/test/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks:
+      - broker-net
+
+  # ---------- Microservice sim → Artemis (native client, Java 21) ----------
+  microservice-artemis:
+    build:
+      context: ./microservice-sim
+      dockerfile: Dockerfile
+    container_name: microservice-artemis
+    ports:
+      - "8082:8082"
+    environment:
+      BROKER_URL: "tcp://artemis-broker:61616?ha=false&useTopologyForLoadBalancing=false"
+      BROKER_USER: admin
+      BROKER_PASSWORD: admin
+      QUEUE_PREFIX: test.microservice.artemis
+      CONSUMER_WINDOW_SIZE: 1048576
+    depends_on:
+      artemis-broker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8082/test/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks:
+      - broker-net
+
+  # ---------- k6 load test runner ----------
+  k6:
+    image: grafana/k6:latest
+    container_name: k6-runner
+    volumes:
+      - ./k6:/scripts
+    working_dir: /scripts
+    environment:
+      CLASSIC_BROKER: classic-broker:61616
+      CLASSIC_JDBC_BROKER: classic-jdbc-broker:61616
+      ARTEMIS_BROKER: artemis-broker:61616
+      MONOLITH_CLASSIC_URL: http://monolith-classic:8081
+      MONOLITH_CLASSIC_JDBC_URL: http://monolith-classic-jdbc:8081
+      MONOLITH_ARTEMIS_URL: http://monolith-artemis:8081
+      MICROSERVICE_ARTEMIS_URL: http://microservice-artemis:8082
+    depends_on:
+      monolith-classic:
+        condition: service_healthy
+      monolith-classic-jdbc:
+        condition: service_healthy
+      monolith-artemis:
+        condition: service_healthy
+      microservice-artemis:
+        condition: service_healthy
+    networks:
+      - broker-net
+    profiles:
+      - k6
+
+volumes:
+  pgdata:
+
+networks:
+  broker-net:
+    driver: bridge

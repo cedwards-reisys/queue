@@ -1,0 +1,95 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "artemis.fullname" . }}-access
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  podSelector:
+    matchLabels:
+      app: artemis
+  policyTypes:
+    - Ingress
+    {{- if .Values.networkPolicy.enableEgressPolicy }}
+    - Egress
+    {{- end }}
+  ingress:
+    # Client connections (producers/consumers)
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.allowedClientLabels | nindent 14 }}
+      ports:
+        - port: {{ .Values.ports.openwire }}
+          protocol: TCP
+    # Inter-broker (cluster + replication)
+    - from:
+        - podSelector:
+            matchLabels:
+              app: artemis
+      ports:
+        - port: {{ .Values.ports.cluster }}
+          protocol: TCP
+        - port: {{ .Values.ports.replication }}
+          protocol: TCP
+        - port: {{ .Values.ports.openwire }}
+          protocol: TCP
+    # Prometheus scraping
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.prometheusNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - port: {{ .Values.ports.metrics }}
+          protocol: TCP
+    # Admin console - restrict by namespace/pod labels for PII compliance
+    - from:
+        {{- if .Values.networkPolicy.allowConsoleFrom }}
+        {{- toYaml .Values.networkPolicy.allowConsoleFrom | nindent 8 }}
+        {{- else }}
+        []  # Empty = deny all console access when allowConsoleFrom not specified
+        {{- end }}
+      ports:
+        - port: {{ .Values.ports.console }}
+          protocol: TCP
+  {{- if .Values.networkPolicy.enableEgressPolicy }}
+  egress:
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow inter-broker communication
+    - to:
+        - podSelector:
+            matchLabels:
+              app: artemis
+      ports:
+        - port: {{ .Values.ports.cluster }}
+          protocol: TCP
+        - port: {{ .Values.ports.replication }}
+          protocol: TCP
+        - port: {{ .Values.ports.openwire }}
+          protocol: TCP
+    # Allow HTTPS egress for cert-manager, external secrets operator, etc.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 443
+          protocol: TCP
+  {{- end }}
+{{- end }}

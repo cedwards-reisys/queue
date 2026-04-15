@@ -1,0 +1,35 @@
+environment: dev
+
+broker:
+  replicas:
+    live: 1
+    backup: 0
+  ha:
+    enabled: false
+  clustered: false
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+  storage:
+    size: 20Gi
+  jvm:
+    xmx: "1g"
+    xms: "512m"
+
+console:
+  ingress:
+    enabled: true
+    host: artemis-ns1.internal.yourdomain.com
+    certificateArn: arn:aws:acm:us-east-2:NONPROD_ACCOUNT:certificate/XXXX
+
+networkPolicy:
+  enabled: false
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 30s

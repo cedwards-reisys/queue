@@ -1,0 +1,29 @@
+{{- if and .Values.console.enabled .Values.console.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "artemis.fullname" . }}-console
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    alb.ingress.kubernetes.io/group.name: {{ .Values.console.ingress.ingressGroup }}
+    alb.ingress.kubernetes.io/scheme: {{ .Values.console.ingress.scheme }}
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.console.ingress.certificateArn }}
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: {{ .Values.console.ingress.healthCheckPath }}
+spec:
+  ingressClassName: {{ .Values.console.ingress.ingressClassName }}
+  rules:
+    - host: {{ .Values.console.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "artemis.fullname" . }}-console
+                port:
+                  number: {{ .Values.console.service.port }}
+{{- end }}

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration xmlns="urn:activemq"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:schemaLocation="urn:activemq /schema/artemis-configuration.xsd">
+
+  <core xmlns="urn:activemq:core"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="urn:activemq:core">
+
+    <persistence-enabled>true</persistence-enabled>
+
+    <!-- Connection tuning -->
+    <connection-ttl-override>30000</connection-ttl-override>
+    <async-connection-execution-enabled>true</async-connection-execution-enabled>
+
+    <!-- Acceptors — must be present since override replaces the entire file -->
+    <acceptors>
+      <acceptor name="artemis">tcp://0.0.0.0:61616?tcpSendBufferSize=1048576;tcpReceiveBufferSize=1048576;amqpMinLargeMessageSize=102400;protocols=CORE,AMQP,STOMP,HORNETQ,MQTT,OPENWIRE;useEpoll=true;amqpCredits=1000;amqpLowCredits=300;amqpDuplicateDetection=true;directDeliver=true</acceptor>
+    </acceptors>
+
+    <!-- Journal — NIO for ARM Mac, tuned for throughput -->
+    <journal-type>NIO</journal-type>
+    <journal-buffer-size>1048576</journal-buffer-size>
+    <journal-file-size>10M</journal-file-size>
+    <journal-min-files>2</journal-min-files>
+    <journal-pool-files>10</journal-pool-files>
+
+    <!-- Global memory cap -->
+    <global-max-size-percent-of-jvm-max-memory>70</global-max-size-percent-of-jvm-max-memory>
+
+    <!-- Security -->
+    <security-settings>
+      <security-setting match="#">
+        <permission type="createNonDurableQueue" roles="amq"/>
+        <permission type="deleteNonDurableQueue" roles="amq"/>
+        <permission type="createDurableQueue" roles="amq"/>
+        <permission type="deleteDurableQueue" roles="amq"/>
+        <permission type="createAddress" roles="amq"/>
+        <permission type="deleteAddress" roles="amq"/>
+        <permission type="consume" roles="amq"/>
+        <permission type="browse" roles="amq"/>
+        <permission type="send" roles="amq"/>
+        <permission type="manage" roles="amq"/>
+      </security-setting>
+    </security-settings>
+
+    <!-- Address settings -->
+    <address-settings>
+      <address-setting match="#">
+        <address-full-policy>PAGE</address-full-policy>
+        <max-size-bytes>256M</max-size-bytes>
+        <page-size-bytes>10M</page-size-bytes>
+        <dead-letter-address>DLQ</dead-letter-address>
+        <expiry-address>ExpiryQueue</expiry-address>
+        <redelivery-delay>1000</redelivery-delay>
+        <max-delivery-attempts>5</max-delivery-attempts>
+        <auto-create-queues>true</auto-create-queues>
+        <auto-create-addresses>true</auto-create-addresses>
+        <auto-delete-queues>false</auto-delete-queues>
+        <auto-delete-addresses>false</auto-delete-addresses>
+      </address-setting>
+    </address-settings>
+
+    <!-- Standard addresses -->
+    <addresses>
+      <address name="DLQ">
+        <anycast><queue name="DLQ"/></anycast>
+      </address>
+      <address name="ExpiryQueue">
+        <anycast><queue name="ExpiryQueue"/></anycast>
+      </address>
+    </addresses>
+
+  </core>
+</configuration>

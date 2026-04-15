@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "artemis.fullname" . }}-broker-config
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  broker-live.xml: |
+    {{- $ctx := deepCopy . -}}
+    {{- $_ := set $ctx "haRole" "primary" -}}
+    {{- include "artemis.brokerXml" $ctx | nindent 4 }}
+  {{- if .Values.broker.ha.enabled }}
+  broker-backup.xml: |
+    {{- $ctx := deepCopy . -}}
+    {{- $_ := set $ctx "haRole" "backup" -}}
+    {{- include "artemis.brokerXml" $ctx | nindent 4 }}
+  {{- end }}
+  bootstrap.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <broker xmlns="http://activemq.apache.org/schema">
+      <jaas-security domain="activemq"/>
+      <server configuration="file:/var/lib/artemis/etc-override/broker.xml"/>
+      {{- if .Values.console.enabled }}
+      <web path="web">
+        <binding uri="http://0.0.0.0:{{ .Values.ports.console }}">
+          <app url="console" war="console.war"/>
+        </binding>
+      </web>
+      {{- end }}
+    </broker>

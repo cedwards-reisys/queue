@@ -1,0 +1,16 @@
+{{- if and .Values.podDisruptionBudget.enabled .Values.broker.ha.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "artemis.fullname" . }}-backup
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "artemis.selectorLabels" . | nindent 6 }}
+      role: backup
+{{- end }}

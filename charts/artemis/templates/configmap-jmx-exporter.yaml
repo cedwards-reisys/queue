@@ -1,0 +1,57 @@
+{{- if .Values.monitoring.jmxExporter.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "artemis.fullname" . }}-jmx-exporter
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+data:
+  jmx-exporter-config.yaml: |
+    startDelaySeconds: 30
+    lowercaseOutputName: true
+    lowercaseOutputLabelNames: true
+    rules:
+      - pattern: "org.apache.activemq.artemis<broker=([^,]+), component=addresses, address=([^,]+), subcomponent=queues, routing-type=([^,]+), queue=([^,]+)><>(MessageCount|MessagesAdded|MessagesAcknowledged|ConsumerCount|DeliveringCount)"
+        name: "artemis_$5"
+        type: GAUGE
+        labels:
+          broker: "$1"
+          address: "$2"
+          routing_type: "$3"
+          queue: "$4"
+      - pattern: "org.apache.activemq.artemis<broker=([^,]+), component=addresses, address=([^,]+), subcomponent=queues, routing-type=([^,]+), queue=([^,]+)><>(MessageCount|MessagesAdded|MessagesAcknowledged)"
+        name: "artemis_$5_total"
+        type: COUNTER
+        labels:
+          broker: "$1"
+          address: "$2"
+          routing_type: "$3"
+          queue: "$4"
+      - pattern: "org.apache.activemq.artemis<broker=([^,]+)><>(ConnectionCount|TotalConnectionCount|TotalMessageCount|TotalMessagesAdded|TotalMessagesAcknowledged)"
+        name: "artemis_broker_$2"
+        type: GAUGE
+        labels:
+          broker: "$1"
+      - pattern: "org.apache.activemq.artemis<broker=([^,]+)><>AddressMemoryUsage"
+        name: "artemis_broker_address_memory_usage"
+        type: GAUGE
+        labels:
+          broker: "$1"
+      - pattern: "org.apache.activemq.artemis<broker=([^,]+)><>AddressMemoryUsagePercentage"
+        name: "artemis_broker_address_memory_usage_pct"
+        type: GAUGE
+        labels:
+          broker: "$1"
+      - pattern: "org.apache.activemq.artemis<broker=([^,]+)><>DiskStoreUsage"
+        name: "artemis_broker_disk_store_usage"
+        type: GAUGE
+        labels:
+          broker: "$1"
+      - pattern: "org.apache.activemq.artemis<broker=([^,]+)><>ReplicaSync"
+        name: "artemis_broker_replica_sync"
+        type: GAUGE
+        labels:
+          broker: "$1"
+{{- end }}

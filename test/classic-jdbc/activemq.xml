@@ -1,0 +1,93 @@
+<beans
+  xmlns="http://www.springframework.org/schema/beans"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans.xsd
+  http://activemq.apache.org/schema/core http://activemq.apache.org/schema/core/activemq-core.xsd">
+
+  <bean class="org.springframework.beans.factory.config.PropertyPlaceholderConfigurer">
+    <property name="locations">
+      <value>file:${activemq.conf}/credentials.properties</value>
+    </property>
+    <property name="systemPropertiesModeName" value="SYSTEM_PROPERTIES_MODE_OVERRIDE"/>
+  </bean>
+
+  <broker xmlns="http://activemq.apache.org/schema/core"
+          brokerName="classic-jdbc"
+          useJmx="true"
+          dataDirectory="${activemq.data}">
+
+    <!-- JDBC persistence with PostgreSQL — mirrors production Classic setup -->
+    <persistenceAdapter>
+      <jdbcPersistenceAdapter dataSource="#postgres-ds"
+                              lockKeepAlivePeriod="5000"
+                              createTablesOnStartup="true"
+                              useLock="true">
+        <locker>
+          <lease-database-locker lockAcquireSleepInterval="10000"/>
+        </locker>
+      </jdbcPersistenceAdapter>
+    </persistenceAdapter>
+
+    <destinationPolicy>
+      <policyMap>
+        <policyEntries>
+          <policyEntry queue=">" producerFlowControl="true" memoryLimit="64mb">
+            <pendingQueuePolicy>
+              <storeCursor/>
+            </pendingQueuePolicy>
+            <deadLetterStrategy>
+              <individualDeadLetterStrategy queuePrefix="DLQ." useQueueForQueueMessages="true"/>
+            </deadLetterStrategy>
+            <dispatchPolicy>
+              <roundRobinDispatchPolicy/>
+            </dispatchPolicy>
+          </policyEntry>
+        </policyEntries>
+      </policyMap>
+    </destinationPolicy>
+
+    <managementContext>
+      <managementContext createConnector="false"/>
+    </managementContext>
+
+    <systemUsage>
+      <systemUsage>
+        <memoryUsage>
+          <memoryUsage limit="256 mb"/>
+        </memoryUsage>
+        <storeUsage>
+          <storeUsage limit="512 mb"/>
+        </storeUsage>
+        <tempUsage>
+          <tempUsage limit="1 gb"/>
+        </tempUsage>
+      </systemUsage>
+    </systemUsage>
+
+    <transportConnectors>
+      <transportConnector name="openwire"
+        uri="tcp://0.0.0.0:61616?maximumConnections=1000&amp;wireFormat.maxFrameSize=104857600&amp;wireFormat.maxInactivityDuration=30000"/>
+    </transportConnectors>
+
+    <shutdownHooks>
+      <bean xmlns="http://www.springframework.org/schema/beans"
+            class="org.apache.activemq.hooks.SpringContextHook"/>
+    </shutdownHooks>
+
+  </broker>
+
+  <!-- PostgreSQL DataSource via DBCP2 connection pool.
+       Properties are injected via -D system properties in ACTIVEMQ_OPTS -->
+  <bean id="postgres-ds" class="org.apache.commons.dbcp2.BasicDataSource" destroy-method="close">
+    <property name="driverClassName" value="org.postgresql.Driver"/>
+    <property name="url" value="jdbc:postgresql://${pg.host}:${pg.port}/${pg.db}"/>
+    <property name="username" value="${pg.user}"/>
+    <property name="password" value="${pg.password}"/>
+    <property name="maxTotal" value="50"/>
+    <property name="initialSize" value="5"/>
+    <property name="poolPreparedStatements" value="true"/>
+    <property name="validationQuery" value="SELECT 1"/>
+    <property name="testOnBorrow" value="true"/>
+  </bean>
+
+</beans>

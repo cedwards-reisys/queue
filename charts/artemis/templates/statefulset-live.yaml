@@ -1,0 +1,261 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "artemis.fullname" . }}-live
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+    role: live
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  serviceName: {{ include "artemis.fullname" . }}-live-headless
+  replicas: {{ .Values.broker.replicas.live }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "artemis.selectorLabels" . | nindent 6 }}
+      role: live
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.broker.storage.storageClass }}
+        resources:
+          requests:
+            storage: {{ .Values.broker.storage.size }}
+  template:
+    metadata:
+      labels:
+        {{- include "artemis.selectorLabels" . | nindent 8 }}
+        role: live
+      annotations:
+        checksum/broker-config: {{ include (print .Template.BasePath "/configmap-broker.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "artemis.serviceAccountName" . }}
+      {{- with .Values.broker.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.broker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        podAntiAffinity:
+          {{- if .Values.broker.ha.enabled }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            # Live must not be in same AZ as its backup
+            - labelSelector:
+                matchLabels:
+                  {{- include "artemis.selectorLabels" . | nindent 18 }}
+                  role: backup
+              topologyKey: topology.kubernetes.io/zone
+          {{- end }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            # Spread live brokers across AZs (preferred to allow >2 pods in 2-AZ clusters)
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "artemis.selectorLabels" . | nindent 20 }}
+                    role: live
+                topologyKey: topology.kubernetes.io/zone
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        # Resolve per-pod placeholders in broker.xml (HA group, hostname, ordinal)
+        - name: config-init
+          image: busybox:1.36
+          {{- with .Values.broker.initContainerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              ORDINAL=${HOSTNAME##*-}
+              sed -e "s/__HA_GROUP__/group-${ORDINAL}/g" \
+                  -e "s/__HOSTNAME__/${HOSTNAME}/g" \
+                  -e "s/__ORDINAL__/${ORDINAL}/g" \
+                  /config-template/broker-live.xml > /config-resolved/broker.xml
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+          volumeMounts:
+            - name: broker-config
+              mountPath: /config-template
+              readOnly: true
+            - name: broker-config-resolved
+              mountPath: /config-resolved
+      {{- if .Values.broker.tls.enabled }}
+        - name: tls-init
+          image: eclipse-temurin:21-jre
+          {{- with .Values.broker.initContainerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.broker.initContainerResources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Convert PEM cert/key to PKCS12 keystore
+              openssl pkcs12 -export \
+                -in /certs/tls.crt \
+                -inkey /certs/tls.key \
+                -out /tls/keystore.p12 \
+                -name artemis \
+                -password pass:${TLS_KEYSTORE_PASSWORD}
+              # Create truststore from CA cert
+              keytool -import -noprompt \
+                -alias ca \
+                -file /certs/ca.crt \
+                -keystore /tls/truststore.p12 \
+                -storetype PKCS12 \
+                -storepass ${TLS_TRUSTSTORE_PASSWORD}
+          env:
+            - name: TLS_KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-credentials" (include "artemis.fullname" .)) .Values.broker.auth.existingSecret }}
+                  key: tls-keystore-password
+            - name: TLS_TRUSTSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-credentials" (include "artemis.fullname" .)) .Values.broker.auth.existingSecret }}
+                  key: tls-truststore-password
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /certs
+              readOnly: true
+            - name: tls-stores
+              mountPath: /tls
+      {{- end }}
+      containers:
+        - name: artemis
+          image: {{ include "artemis.image" . }}
+          imagePullPolicy: {{ .Values.broker.image.pullPolicy }}
+          {{- with .Values.broker.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: ARTEMIS_USER
+              value: {{ .Values.broker.auth.adminUser | quote }}
+            - name: ARTEMIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-credentials" (include "artemis.fullname" .)) .Values.broker.auth.existingSecret }}
+                  key: admin-password
+            - name: JAVA_ARGS
+              value: {{ include "artemis.jvmArgs" . | quote }}
+            - name: BROKER_CONFIG
+              value: /var/lib/artemis/etc-override/broker.xml
+          {{- if .Values.broker.tls.enabled }}
+            - name: TLS_KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-credentials" (include "artemis.fullname" .)) .Values.broker.auth.existingSecret }}
+                  key: tls-keystore-password
+            - name: TLS_TRUSTSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-credentials" (include "artemis.fullname" .)) .Values.broker.auth.existingSecret }}
+                  key: tls-truststore-password
+          {{- end }}
+          ports:
+            - name: openwire
+              containerPort: {{ .Values.ports.openwire }}
+              protocol: TCP
+            {{- if .Values.broker.clustered }}
+            - name: cluster
+              containerPort: {{ .Values.ports.cluster }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.broker.ha.enabled }}
+            - name: replication
+              containerPort: {{ .Values.ports.replication }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.console.enabled }}
+            - name: console
+              containerPort: {{ .Values.ports.console }}
+              protocol: TCP
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: openwire
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: openwire
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.broker.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/artemis/data
+            - name: broker-config-resolved
+              mountPath: /var/lib/artemis/etc-override/broker.xml
+              subPath: broker.xml
+              readOnly: true
+            {{- if .Values.broker.tls.enabled }}
+            - name: tls-stores
+              mountPath: /var/lib/artemis/tls
+              readOnly: true
+            {{- end }}
+        {{- if .Values.monitoring.jmxExporter.enabled }}
+        - name: jmx-exporter
+          image: {{ .Values.monitoring.jmxExporter.image.repository }}:{{ .Values.monitoring.jmxExporter.image.tag }}
+          imagePullPolicy: {{ .Values.monitoring.jmxExporter.image.pullPolicy }}
+          {{- with .Values.monitoring.jmxExporter.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.monitoring.jmxExporter.port }}
+              protocol: TCP
+          args:
+            - {{ .Values.monitoring.jmxExporter.port | quote }}
+            - /etc/jmx-exporter/jmx-exporter-config.yaml
+          volumeMounts:
+            - name: jmx-exporter-config
+              mountPath: /etc/jmx-exporter
+              readOnly: true
+          resources:
+            {{- toYaml .Values.monitoring.jmxExporter.resources | nindent 12 }}
+        {{- end }}
+      volumes:
+        - name: broker-config
+          configMap:
+            name: {{ include "artemis.fullname" . }}-broker-config
+        - name: broker-config-resolved
+          emptyDir:
+            sizeLimit: 5Mi
+        {{- if .Values.broker.tls.enabled }}
+        - name: tls-certs
+          secret:
+            secretName: {{ default (printf "%s-tls" (include "artemis.fullname" .)) .Values.broker.tls.certSecret }}
+        - name: tls-stores
+          emptyDir:
+            sizeLimit: 10Mi
+        {{- end }}
+        {{- if .Values.monitoring.jmxExporter.enabled }}
+        - name: jmx-exporter-config
+          configMap:
+            name: {{ include "artemis.fullname" . }}-jmx-exporter
+        {{- end }}

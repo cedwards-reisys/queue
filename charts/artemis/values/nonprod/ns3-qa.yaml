@@ -1,0 +1,44 @@
+environment: qa
+
+broker:
+  replicas:
+    live: 1
+    backup: 1
+  ha:
+    enabled: true
+    replication: synchronous
+    quorumSize: 1
+  clustered: false
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  storage:
+    size: 50Gi
+    provisionedIops: "6000"
+    provisionedThroughput: "250"
+  jvm:
+    xmx: "2g"
+    xms: "1g"
+  journal:
+    syncNonTransactional: true
+
+console:
+  ingress:
+    enabled: true
+    host: artemis-ns3.internal.yourdomain.com
+    certificateArn: arn:aws:acm:us-east-2:NONPROD_ACCOUNT:certificate/XXXX
+
+networkPolicy:
+  enabled: true
+
+podDisruptionBudget:
+  enabled: true
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 15s

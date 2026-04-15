@@ -1,0 +1,26 @@
+{{- if .Values.broker.storage.createStorageClass }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.broker.storage.storageClass }}
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+parameters:
+  type: gp3
+  encrypted: "true"
+  {{- if .Values.broker.storage.kmsKeyId }}
+  kmsKeyId: {{ .Values.broker.storage.kmsKeyId | quote }}
+  {{- end }}
+  {{- if .Values.broker.storage.provisionedIops }}
+  iops: {{ .Values.broker.storage.provisionedIops | quote }}
+  {{- end }}
+  {{- if .Values.broker.storage.provisionedThroughput }}
+  throughput: {{ .Values.broker.storage.provisionedThroughput | quote }}
+  {{- end }}
+  fsType: ext4
+{{- end }}

@@ -1,0 +1,279 @@
+{{- if .Values.monitoring.grafanaDashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "artemis.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+    {{- with .Values.monitoring.grafanaDashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+    {{- with .Values.monitoring.grafanaDashboard.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+data:
+  artemis-dashboard.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "links": [],
+      "panels": [
+        {
+          "title": "Broker Overview",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "collapsed": false
+        },
+        {
+          "title": "Total Connections",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+          "targets": [{
+            "expr": "sum(artemis_broker_ConnectionCount{namespace=\"$namespace\"})",
+            "legendFormat": "connections"
+          }],
+          "fieldConfig": { "defaults": { "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 500 },
+            { "color": "red", "value": 900 }
+          ]}}}
+        },
+        {
+          "title": "Total Pending Messages",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+          "targets": [{
+            "expr": "sum(artemis_MessageCount{namespace=\"$namespace\",queue!~\"DLQ.*|ExpiryQueue\"})",
+            "legendFormat": "pending"
+          }],
+          "fieldConfig": { "defaults": { "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 10000 },
+            { "color": "red", "value": 50000 }
+          ]}}}
+        },
+        {
+          "title": "Total DLQ Messages",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+          "targets": [{
+            "expr": "sum(artemis_MessageCount{namespace=\"$namespace\",queue=~\"DLQ.*\"})",
+            "legendFormat": "DLQ"
+          }],
+          "fieldConfig": { "defaults": { "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 1 },
+            { "color": "red", "value": 100 }
+          ]}}}
+        },
+        {
+          "title": "Address Memory Usage %",
+          "type": "gauge",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+          "targets": [{
+            "expr": "max(artemis_broker_address_memory_usage_pct{namespace=\"$namespace\"})",
+            "legendFormat": "memory %"
+          }],
+          "fieldConfig": { "defaults": { "min": 0, "max": 100, "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 70 },
+            { "color": "red", "value": 90 }
+          ]}}}
+        },
+        {
+          "title": "Disk Store Usage %",
+          "type": "gauge",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+          "targets": [{
+            "expr": "max(artemis_broker_disk_store_usage{namespace=\"$namespace\"}) * 100",
+            "legendFormat": "disk %"
+          }],
+          "fieldConfig": { "defaults": { "min": 0, "max": 100, "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 70 },
+            { "color": "red", "value": 90 }
+          ]}}}
+        },
+        {
+          "title": "Replica Sync",
+          "type": "stat",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+          "targets": [{
+            "expr": "min(artemis_broker_replica_sync{namespace=\"$namespace\"})",
+            "legendFormat": "synced"
+          }],
+          "fieldConfig": { "defaults": { "mappings": [
+            { "type": "value", "options": { "1": { "text": "SYNCED", "color": "green" }, "0": { "text": "NOT SYNCED", "color": "red" } }}
+          ]}}
+        },
+        {
+          "title": "Throughput",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+          "collapsed": false
+        },
+        {
+          "title": "Enqueue Rate (msgs/sec)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "targets": [{
+            "expr": "sum(rate(artemis_MessagesAdded_total{namespace=\"$namespace\",queue=~\"$queue\"}[2m])) by (queue)",
+            "legendFormat": "{{ "{{queue}}" }}"
+          }],
+          "fieldConfig": { "defaults": { "unit": "msg/s" }}
+        },
+        {
+          "title": "Dequeue Rate (msgs/sec)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "targets": [{
+            "expr": "sum(rate(artemis_MessagesAcknowledged_total{namespace=\"$namespace\",queue=~\"$queue\"}[2m])) by (queue)",
+            "legendFormat": "{{ "{{queue}}" }}"
+          }],
+          "fieldConfig": { "defaults": { "unit": "msg/s" }}
+        },
+        {
+          "title": "Queue Depth",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+          "collapsed": false
+        },
+        {
+          "title": "Queue Depth (Pending Messages)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+          "targets": [{
+            "expr": "sum(artemis_MessageCount{namespace=\"$namespace\",queue=~\"$queue\",queue!~\"DLQ.*|ExpiryQueue\"}) by (queue)",
+            "legendFormat": "{{ "{{queue}}" }}"
+          }]
+        },
+        {
+          "title": "DLQ Depth",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+          "targets": [{
+            "expr": "sum(artemis_MessageCount{namespace=\"$namespace\",queue=~\"DLQ.*\"}) by (queue)",
+            "legendFormat": "{{ "{{queue}}" }}"
+          }],
+          "fieldConfig": { "defaults": { "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ]}}}
+        },
+        {
+          "title": "Consumers",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+          "collapsed": false
+        },
+        {
+          "title": "Consumer Count per Queue",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+          "targets": [{
+            "expr": "sum(artemis_ConsumerCount{namespace=\"$namespace\",queue=~\"$queue\"}) by (queue)",
+            "legendFormat": "{{ "{{queue}}" }}"
+          }]
+        },
+        {
+          "title": "Delivering Count (In-Flight)",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+          "targets": [{
+            "expr": "sum(artemis_DeliveringCount{namespace=\"$namespace\",queue=~\"$queue\"}) by (queue)",
+            "legendFormat": "{{ "{{queue}}" }}"
+          }]
+        },
+        {
+          "title": "Broker Resources",
+          "type": "row",
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 },
+          "collapsed": false
+        },
+        {
+          "title": "Broker CPU Usage",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 33 },
+          "targets": [{
+            "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"$namespace\",pod=~\"artemis-.*\",container=\"artemis\"}[2m])) by (pod)",
+            "legendFormat": "{{ "{{pod}}" }}"
+          }],
+          "fieldConfig": { "defaults": { "unit": "short" }}
+        },
+        {
+          "title": "Broker Memory Usage",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 33 },
+          "targets": [{
+            "expr": "sum(container_memory_working_set_bytes{namespace=\"$namespace\",pod=~\"artemis-.*\",container=\"artemis\"}) by (pod)",
+            "legendFormat": "{{ "{{pod}}" }}"
+          }],
+          "fieldConfig": { "defaults": { "unit": "bytes" }}
+        },
+        {
+          "title": "Connections per Broker",
+          "type": "timeseries",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 33 },
+          "targets": [{
+            "expr": "artemis_broker_ConnectionCount{namespace=\"$namespace\"}",
+            "legendFormat": "{{ "{{broker}}" }}"
+          }]
+        }
+      ],
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "selected": false, "text": "default", "value": "default" }
+          },
+          {
+            "name": "namespace",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": "label_values(artemis_broker_ConnectionCount, namespace)",
+            "refresh": 2,
+            "sort": 1
+          },
+          {
+            "name": "queue",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "${datasource}" },
+            "query": "label_values(artemis_MessageCount{namespace=\"$namespace\"}, queue)",
+            "refresh": 2,
+            "sort": 1,
+            "multi": true,
+            "includeAll": true,
+            "allValue": ".*"
+          }
+        ]
+      },
+      "schemaVersion": 39,
+      "tags": ["artemis", "messaging", "{{ .Values.environment }}"],
+      "time": { "from": "now-1h", "to": "now" },
+      "refresh": "30s",
+      "title": "ActiveMQ Artemis - {{ .Values.environment }}",
+      "uid": "artemis-{{ .Values.environment }}"
+    }
+{{- end }}

@@ -1,0 +1,32 @@
+{{- if .Values.broker.nlb.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "artemis.fullname" . }}-live-nlb
+  labels:
+    {{- include "artemis.labels" . | nindent 4 }}
+    role: live
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "{{ .Values.ports.openwire }}"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "TCP"
+    {{- if .Values.broker.nlb.groupName }}
+    service.beta.kubernetes.io/aws-load-balancer-group.name: {{ .Values.broker.nlb.groupName | quote }}
+    {{- end }}
+    {{- with .Values.broker.nlb.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: LoadBalancer
+  selector:
+    {{- include "artemis.selectorLabels" . | nindent 4 }}
+    role: live
+  ports:
+    - name: openwire
+      port: {{ .Values.ports.openwire }}
+      targetPort: openwire
+      protocol: TCP
+{{- end }}

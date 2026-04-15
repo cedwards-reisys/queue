@@ -1,0 +1,86 @@
+environment: prod
+
+broker:
+  replicas:
+    live: 2
+    backup: 2
+  ha:
+    enabled: true
+    replication: synchronous
+    quorumSize: 1
+  clustered: true
+  resources:
+    requests:
+      cpu: "2"
+      memory: "4Gi"
+    limits:
+      cpu: "4"
+      memory: "8Gi"
+  storage:
+    size: 200Gi
+    storageClass: artemis-gp3-encrypted
+    # CRITICAL: Specify CMK ARN for PII compliance (NIST 800-53 SC-28, SC-12)
+    kmsKeyId: "arn:aws:kms:us-east-2:ACCOUNT_ID:key/YOUR_CMK_ID"  # FIXME: Replace with actual CMK ARN
+    provisionedIops: "10000"       # 10K IOPS for fsync-heavy journal (baseline 3K insufficient)
+    provisionedThroughput: "250"   # MB/s
+  tls:
+    enabled: true
+    # CRITICAL: Enforce mTLS for PII workloads (NIST 800-53 SC-8, SC-23)
+    requireClientAuth: true
+    certManager:
+      enabled: true
+      issuerRef:
+        name: internal-ca          # Your cert-manager ClusterIssuer
+        kind: ClusterIssuer
+  jvm:
+    xmx: "4g"
+    xms: "2g"
+    gc: "-XX:+UseZGC"
+  journal:
+    bufferSize: 1048576
+    minFiles: 10
+    poolFiles: 20
+    syncNonTransactional: true
+  largeMessages:
+    minSize: 102400
+  addressing:
+    addressFullPolicy: BLOCK
+    maxDeliveryAttempts: 10
+    redeliveryDelay: 5000
+    autoCreateDlq: true
+    dlqPrefix: "DLQ."
+  nlb:
+    enabled: true
+    groupName: "artemis-nlb"
+
+console:
+  ingress:
+    enabled: true
+    host: artemis-ns1.internal.yourdomain.com
+    certificateArn: arn:aws:acm:us-east-2:PROD_ACCOUNT:certificate/XXXX
+
+networkPolicy:
+  enabled: true
+  enableEgressPolicy: true  # CRITICAL: Default-deny egress for PII compliance
+  # Restrict console access to operations namespace only
+  allowConsoleFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: operations
+      podSelector:
+        matchLabels:
+          app: bastion
+
+podDisruptionBudget:
+  enabled: true
+
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    labels:
+      release: prometheus
+  grafanaDashboard:
+    enabled: true
+    annotations:
+      grafana_folder: "Messaging"

@@ -1,0 +1,17 @@
+server:
+  port: 8081
+
+spring:
+  activemq:
+    broker-url: ${BROKER_URL:failover:(tcp://localhost:61616)?maxReconnectAttempts=5&reconnectDelay=1000}
+    user: ${BROKER_USER:admin}
+    password: ${BROKER_PASSWORD:admin}
+
+test:
+  queue-prefix: ${QUEUE_PREFIX:test.monolith}
+  prefetch-size: ${PREFETCH_SIZE:1000}
+
+logging:
+  level:
+    com.test.monolith: DEBUG
+    org.apache.activemq: WARN

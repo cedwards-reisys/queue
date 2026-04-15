@@ -1,0 +1,10 @@
+server:
+  port: 8082
+spring:
+  artemis:
+    broker-url: ${BROKER_URL:tcp://localhost:61616?ha=false&useTopologyForLoadBalancing=false}
+    user: ${BROKER_USER:admin}
+    password: ${BROKER_PASSWORD:admin}
+test:
+  queue-prefix: ${QUEUE_PREFIX:test.microservice}
+  consumer-window-size: ${CONSUMER_WINDOW_SIZE:1048576}
