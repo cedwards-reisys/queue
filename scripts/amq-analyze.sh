@@ -34,11 +34,16 @@ Options:
     -t, --table TABLE        Message table name (default: \$AMQ_DB_TABLE or ACTIVEMQ_MSGS)
     -s, --sizes-only         Run size analysis only (skip throughput estimation)
     -r, --throughput-only    Run throughput estimation only (skip size analysis)
+    -c, --connections        Show connection distribution by client IP (requires JMX HTTP or broker host)
+    -b, --broker-url URL     Broker admin URL for connection analysis (default: \$AMQ_BROKER_URL or http://localhost:8161)
     -i, --interval SECONDS   Sampling interval for throughput (default: \$AMQ_SAMPLE_INTERVAL or 60)
     --help                   Show this help
 
 Environment variables:
     AMQ_DB_HOST, AMQ_DB_PORT, AMQ_DB_NAME, AMQ_DB_USER, AMQ_DB_TABLE, AMQ_SAMPLE_INTERVAL
+    AMQ_BROKER_URL           Broker admin URL (default: http://localhost:8161)
+    AMQ_BROKER_USER          Broker admin user (default: admin)
+    AMQ_BROKER_PASS          Broker admin password (default: admin)
     PGPASSWORD               PostgreSQL password (or use .pgpass)
 
 Examples:
@@ -46,12 +51,19 @@ Examples:
     $(basename "$0") -s                     # sizes only
     $(basename "$0") -r -i 120              # throughput with 2 min sample
     PGPASSWORD=secret $(basename "$0") -h mydb.rds.amazonaws.com -d amqdb -U admin
+    $(basename "$0") -c                        # connection analysis only
+    $(basename "$0") -c -b http://broker:8161  # connections against specific broker
 EOF
     exit 0
 }
 
+BROKER_URL="${AMQ_BROKER_URL:-http://localhost:8161}"
+BROKER_USER="${AMQ_BROKER_USER:-admin}"
+BROKER_PASS="${AMQ_BROKER_PASS:-admin}"
+
 RUN_SIZES=true
 RUN_THROUGHPUT=true
+RUN_CONNECTIONS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -60,8 +72,10 @@ while [[ $# -gt 0 ]]; do
         -d|--database) DB_NAME="$2"; shift 2 ;;
         -U|--user) DB_USER="$2"; shift 2 ;;
         -t|--table) DB_TABLE="$2"; shift 2 ;;
-        -s|--sizes-only) RUN_THROUGHPUT=false; shift ;;
-        -r|--throughput-only) RUN_SIZES=false; shift ;;
+        -s|--sizes-only) RUN_THROUGHPUT=false; RUN_CONNECTIONS=false; shift ;;
+        -r|--throughput-only) RUN_SIZES=false; RUN_CONNECTIONS=false; shift ;;
+        -c|--connections) RUN_CONNECTIONS=true; RUN_SIZES=false; RUN_THROUGHPUT=false; shift ;;
+        -b|--broker-url) BROKER_URL="$2"; shift 2 ;;
         -i|--interval) SAMPLE_INTERVAL="$2"; shift 2 ;;
         --help) usage ;;
         *) echo "Unknown option: $1"; usage ;;
@@ -294,6 +308,141 @@ if [[ "${RUN_THROUGHPUT}" == "true" ]]; then
     echo -e "${YELLOW}Caveat:${RESET} This is drain rate / consumer count. If a queue has N concurrent"
     echo "consumers, actual per-message time = estimate * N. Check your Spring Boot"
     echo "concurrency settings (spring.jms.listener.concurrency) per queue."
+fi
+
+if [[ "${RUN_CONNECTIONS}" == "true" ]]; then
+    # --- Connection Distribution by Client IP ---
+    # Uses Classic's Jolokia REST API (JMX over HTTP) to query broker connections.
+    # Helps identify: connection leaks, missing pooling, noisy clients.
+    echo ""
+    echo -e "${BOLD}${GREEN}=== Connection Distribution by Client IP ===${RESET}"
+    echo -e "Broker: ${CYAN}${BROKER_URL}${RESET}"
+    echo ""
+
+    # Check connectivity to broker admin
+    JOLOKIA_URL="${BROKER_URL}/api/jolokia"
+    if ! curl -sf -u "${BROKER_USER}:${BROKER_PASS}" "${JOLOKIA_URL}/version" &>/dev/null; then
+        echo -e "${YELLOW}Warning: Cannot reach Jolokia at ${JOLOKIA_URL}${RESET}"
+        echo "Ensure the broker admin console is accessible and credentials are correct."
+        echo "Set AMQ_BROKER_URL, AMQ_BROKER_USER, AMQ_BROKER_PASS as needed."
+    else
+        # Query total connection count
+        CONN_COUNT=$(curl -sf -u "${BROKER_USER}:${BROKER_PASS}" \
+            "${JOLOKIA_URL}/read/org.apache.activemq:type=Broker,brokerName=localhost/CurrentConnectionsCount" \
+            2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('value','N/A'))" 2>/dev/null || echo "N/A")
+        echo -e "Total broker connections: ${BOLD}${CONN_COUNT}${RESET}"
+        echo ""
+
+        # Query all connections — Classic exposes each as a JMX Connection MBean
+        # MBean pattern: org.apache.activemq:type=Broker,brokerName=*,connectorName=*,connectionViewType=clientId,connectionName=*
+        CONN_JSON=$(curl -sf -u "${BROKER_USER}:${BROKER_PASS}" \
+            "${JOLOKIA_URL}/search/org.apache.activemq:type=Broker,brokerName=*,connectorName=*,connectionViewType=clientId,connectionName=*" \
+            2>/dev/null || echo '{"value":[]}')
+
+        # Extract RemoteAddress from each connection MBean and aggregate by IP
+        echo -e "${BOLD}Connections per Client IP:${RESET}"
+        echo ""
+        printf "%-40s %10s %8s  %s\n" "CLIENT IP" "CONNS" "PCT" "BAR"
+        printf "%-40s %10s %8s  %s\n" "---------" "-----" "---" "---"
+
+        echo "${CONN_JSON}" | python3 -c "
+import sys, json, urllib.request, base64
+
+data = json.load(sys.stdin)
+mbeans = data.get('value', [])
+
+if not mbeans:
+    print('  No connection MBeans found.')
+    sys.exit(0)
+
+broker_url = '${JOLOKIA_URL}'
+auth = base64.b64encode('${BROKER_USER}:${BROKER_PASS}'.encode()).decode()
+
+# Batch read RemoteAddress from each connection MBean
+ips = {}
+for mbean in mbeans:
+    try:
+        url = f\"{broker_url}/read/{urllib.parse.quote(mbean, safe='')}/RemoteAddress\"
+        req = urllib.request.Request(url, headers={'Authorization': f'Basic {auth}'})
+        resp = urllib.request.urlopen(req, timeout=5)
+        result = json.loads(resp.read())
+        addr = result.get('value', 'unknown')
+        # RemoteAddress is typically 'tcp://IP:port' — extract just the IP
+        ip = addr.replace('tcp://', '').rsplit(':', 1)[0] if '://' in addr else addr.rsplit(':', 1)[0]
+        ips[ip] = ips.get(ip, 0) + 1
+    except Exception:
+        ips['(error)'] = ips.get('(error)', 0) + 1
+
+total = sum(ips.values())
+max_count = max(ips.values()) if ips else 1
+
+for ip, count in sorted(ips.items(), key=lambda x: -x[1]):
+    pct = count * 100.0 / total if total > 0 else 0
+    bar_len = int(count * 40 / max_count) if max_count > 0 else 0
+    bar = '█' * bar_len
+    print(f'{ip:<40s} {count:>10d} {pct:>7.1f}%  {bar}')
+
+print()
+print(f'Total unique client IPs: {len(ips)}')
+print(f'Average connections per IP: {total / len(ips):.1f}' if ips else '')
+" 2>/dev/null
+
+        # Idle vs active breakdown
+        echo ""
+        echo -e "${BOLD}Connection Idle Analysis:${RESET}"
+        echo ""
+        echo "${CONN_JSON}" | python3 -c "
+import sys, json, urllib.request, base64, time
+
+data = json.load(sys.stdin)
+mbeans = data.get('value', [])
+
+if not mbeans:
+    sys.exit(0)
+
+broker_url = '${JOLOKIA_URL}'
+auth = base64.b64encode('${BROKER_USER}:${BROKER_PASS}'.encode()).decode()
+
+active = 0
+idle = 0
+idle_threshold = 300  # 5 min — connections with no dispatch in this window are 'idle'
+
+for mbean in mbeans:
+    try:
+        url = f\"{broker_url}/read/{urllib.parse.quote(mbean, safe='')}/DispatchQueueSize\"
+        req = urllib.request.Request(url, headers={'Authorization': f'Basic {auth}'})
+        resp = urllib.request.urlopen(req, timeout=5)
+        result = json.loads(resp.read())
+        dispatch_size = int(result.get('value', 0))
+        if dispatch_size > 0:
+            active += 1
+        else:
+            idle += 1
+    except Exception:
+        pass
+
+total = active + idle
+print(f'  Active (dispatching):  {active:>6d}  ({active*100/total:.1f}%)' if total else '')
+print(f'  Idle (no dispatch):    {idle:>6d}  ({idle*100/total:.1f}%)' if total else '')
+print(f'  Total:                 {total:>6d}')
+print()
+if idle > total * 0.5:
+    print('  ⚠ Over 50% idle connections — likely missing connection pooling or leaked connections.')
+    print('  Check client-side CachingConnectionFactory / pooled-jms configuration.')
+elif idle > total * 0.3:
+    print('  Note: 30-50% idle — may be normal for bursty workloads, but worth investigating.')
+else:
+    print('  Connection utilization looks healthy.')
+" 2>/dev/null
+
+        echo ""
+        echo -e "${YELLOW}Notes:${RESET}"
+        echo "  - High connection count from a single IP = likely missing connection pooling"
+        echo "  - Many IPs with 1-2 connections each = healthy, well-pooled clients"
+        echo "  - Connections per IP ≈ ASG instance count × pool size per instance"
+        echo "  - If total connections >> (instance count × expected pool size), investigate leaks"
+        echo "  - Compare with NR data to cross-validate: connections here should match NR APM connection metrics"
+    fi
 fi
 
 echo ""
