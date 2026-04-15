@@ -12,10 +12,10 @@ broker:
   resources:
     requests:
       cpu: "2"
-      memory: "4Gi"
+      memory: "6Gi"              # Increased — should be >= xms (4g) + overhead
     limits:
       cpu: "4"
-      memory: "8Gi"
+      memory: "10Gi"             # JVM 6g + metaspace + native memory + JMX sidecar (~1.7x heap)
   storage:
     size: 200Gi
     storageClass: artemis-gp3-encrypted
@@ -33,14 +33,19 @@ broker:
         name: internal-ca          # Your cert-manager ClusterIssuer
         kind: ClusterIssuer
   jvm:
-    xmx: "4g"
-    xms: "2g"
+    xmx: "6g"                      # 4-6K connections + 6.8GB pending messages needs more heap
+    xms: "4g"                      # Pre-allocate to avoid GC resize pauses at startup
     gc: "-XX:+UseZGC"
+    extraOpts: "-XX:MaxGCPauseMillis=200"  # ZGC pause target for connection-heavy workload
   journal:
-    bufferSize: 1048576
+    bufferSize: 1048576            # 1MB buffer for production throughput
     minFiles: 10
-    poolFiles: 20
-    syncNonTransactional: true
+    fileSize: 134217728            # 128MB — 64MB max DLQ messages cannot span journal files; 2x headroom
+    poolFiles: 50                  # Larger pool for 128MB files — faster cycle rate needs more reuse slots
+    compactMinFiles: 5             # With 128MB files, fewer accumulate — compact sooner to reclaim space
+    syncNonTransactional: true     # Zero-loss durability for prod
+  paging:
+    globalMaxSize: 3221225472      # 3GB (50% of 6g heap) — explicit limit for operator visibility
   largeMessages:
     minSize: 102400
   addressing:
@@ -49,9 +54,34 @@ broker:
     redeliveryDelay: 5000
     autoCreateDlq: true
     dlqPrefix: "DLQ."
+  addressSettingOverrides:
+    # DLQ queues hold the largest messages (64MB max) and most storage (2.6GB+)
+    # PAGE policy prevents DLQ backlog from blocking producers
+    # 7-day expiry prevents unbounded growth
+    - match: "DLQ.#"
+      maxSizeBytes: 4294967296          # 4GB — largest DLQ currently holds 2.6GB
+      addressFullPolicy: PAGE           # DLQs must page to disk, never block producers
+      expiryDelay: 604800000            # 7 days (ms) — TTL to prevent unbounded growth
+      maxDeliveryAttempts: -1           # Messages in DLQ should not be re-DLQ'd
+
+  # --- Thread Pool Tuning for 4-6K Concurrent Connections ---
+  threads:
+    threadPoolMaxSize: 200         # Default 30 causes starvation at 6K connections
+    scheduledThreadPoolMaxSize: 20 # 152 queues need more scheduled task capacity
+
+  # --- Connection Management ---
+  connections:
+    maxConnections: 8000           # 2x peak (6K) for rolling deploy headroom
+    ttlOverride: 350000            # 350s — aligns with NLB idle timeout to prevent half-open connections
+    ttlCheckInterval: 10000        # 10s — frequent cleanup at high connection count (vs default 30s)
+
   nlb:
     enabled: true
     groupName: "artemis-nlb"
+    annotations:
+      # NLB idle timeout (400s) must exceed broker connection-ttl (350s)
+      # 50s buffer covers TTL check interval cycles
+      service.beta.kubernetes.io/aws-load-balancer-attributes: "idle_timeout.timeout_seconds=400"
 
 console:
   ingress:

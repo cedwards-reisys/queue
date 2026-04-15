@@ -241,13 +241,13 @@ Render broker.xml
         <max-delivery-attempts>{{ .maxDeliveryAttempts }}</max-delivery-attempts>
         {{- end }}
         {{- if .maxSizeBytes }}
-        <max-size-bytes>{{ .maxSizeBytes }}</max-size-bytes>
+        <max-size-bytes>{{ int64 .maxSizeBytes }}</max-size-bytes>
         {{- end }}
         {{- if .redeliveryDelay }}
-        <redelivery-delay>{{ .redeliveryDelay }}</redelivery-delay>
+        <redelivery-delay>{{ int64 .redeliveryDelay }}</redelivery-delay>
         {{- end }}
         {{- if .maxRedeliveryDelay }}
-        <max-redelivery-delay>{{ .maxRedeliveryDelay }}</max-redelivery-delay>
+        <max-redelivery-delay>{{ int64 .maxRedeliveryDelay }}</max-redelivery-delay>
         {{- end }}
         {{- if .redeliveryMultiplier }}
         <redelivery-delay-multiplier>{{ printf "%.1f" (.redeliveryMultiplier | float64) }}</redelivery-delay-multiplier>
@@ -256,7 +256,7 @@ Render broker.xml
         <address-full-policy>{{ .addressFullPolicy }}</address-full-policy>
         {{- end }}
         {{- if .expiryDelay }}
-        <expiry-delay>{{ .expiryDelay }}</expiry-delay>
+        <expiry-delay>{{ int64 .expiryDelay }}</expiry-delay>
         {{- end }}
         {{- if .slowConsumerThreshold }}
         <slow-consumer-threshold>{{ .slowConsumerThreshold }}</slow-consumer-threshold>

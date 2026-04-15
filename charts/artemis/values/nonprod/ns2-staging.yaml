@@ -12,16 +12,16 @@ broker:
   resources:
     requests:
       cpu: "1"
-      memory: "2Gi"
+      memory: "3Gi"              # Increased — should be >= xms + overhead for connection testing
     limits:
       cpu: "2"
-      memory: "4Gi"
+      memory: "6Gi"              # JVM 3g + metaspace + native memory (~2x heap)
   storage:
     size: 50Gi
     provisionedIops: "6000"        # Load testing needs headroom above gp3 baseline 3K
     provisionedThroughput: "250"
   jvm:
-    xmx: "2g"
+    xmx: "3g"                      # Increased — headroom for connection testing
     xms: "1g"
   journal:
     syncNonTransactional: true

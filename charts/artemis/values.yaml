@@ -83,11 +83,11 @@ broker:
     type: ASYNCIO                 # ASYNCIO (libaio) on x86/amd64 for direct I/O — bypasses page cache
     bufferSize: 501760            # ~490KB default. Increase to 1-2MB for burst throughput
     minFiles: 2                   # Pre-allocated journal files. Increase to 10-20 for prod
-    poolFiles: -1                 # Reuse pool. Set 20-50 for prod to avoid file create/delete churn
+    poolFiles: -1                 # Reuse pool. Size based on fileSize * message rate: larger files + high volume = larger pool (20-50 prod). -1 = no reuse
     syncTransactional: true       # fsync on transactional writes. Always true for durability
     syncNonTransactional: false   # fsync on all writes. Set true for zero-loss prod
-    fileSize: 10485760            # 10MB per journal file. Increase for high-throughput (max 2GB)
-    compactMinFiles: 10           # Trigger compaction when this many files exist
+    fileSize: 10485760            # 10MB per journal file. Must exceed largest message size — messages cannot span journal files. Default 10MB sufficient for <10MB messages
+    compactMinFiles: 10           # Trigger compaction when this many files exist. Lower values (5-10) for large fileSize to reclaim space sooner
     compactPercentage: 30         # Compact when live data < 30% of journal size
     maxIo: 500                    # Max concurrent IO. ASYNCIO=500, NIO=1
 
@@ -104,8 +104,8 @@ broker:
 
   # --- Thread Pools ---
   threads:
-    threadPoolMaxSize: 30         # General thread pool. -1 = unbounded. 30 = good default
-    scheduledThreadPoolMaxSize: 5 # Scheduled tasks (expiry scans, redelivery). 5 = default
+    threadPoolMaxSize: 30         # General thread pool. -1 = unbounded. 30 = good default for <1K connections. For 4-6K connections, size to 150-200
+    scheduledThreadPoolMaxSize: 5 # Scheduled tasks (expiry scans, redelivery). 5 = default. For 100+ queues or 4-6K connections, increase to 15-20
 
   # --- Addressing / Queue Behavior ---
   addressing:
@@ -130,11 +130,17 @@ broker:
 
   # --- Address Setting Overrides ---
   # Apply different policies to specific queue patterns
-  # Example: documents.# gets lower retry count, orders.# gets higher max size
+  # DLQ pattern: prevent unbounded growth with TTL + PAGE policy
+  # Business queue patterns: tune retry count, backoff, size limits
   addressSettingOverrides: []
+  # - match: "DLQ.#"
+  #   maxSizeBytes: 4294967296      # 4GB - accommodate large DLQ messages
+  #   addressFullPolicy: PAGE       # DLQs must page to disk, never block producers
+  #   expiryDelay: 604800000        # 7 days (ms) - TTL to prevent unbounded growth
+  #   maxDeliveryAttempts: -1       # Messages in DLQ should not be re-DLQ'd
   # - match: "documents.#"
   #   maxDeliveryAttempts: 5
-  #   maxSizeBytes: 524288000     # 500MB
+  #   maxSizeBytes: 524288000       # 500MB
   # - match: "orders.#"
   #   maxDeliveryAttempts: 15
   #   redeliveryDelay: 10000
@@ -160,11 +166,14 @@ broker:
   nlb:
     enabled: false                  # Enable for EC2 clients outside EKS
     groupName: ""                   # NLB ingress group (e.g. "artemis-nlb")
+    # NLB idle timeout should be ~50s above broker connection-ttl-override
+    # to prevent NLB from closing connections before broker detects staleness.
+    # Default NLB idle timeout: 350s. Set higher if connection-ttl is increased.
     annotations: {}                 # Extra LB annotations (cross-zone, idle timeout, etc.)
 
   # --- Connection Management ---
   connections:
-    maxConnections: 1000          # Per acceptor — size for 2x peak during rolling deploys
+    maxConnections: 1000          # Per acceptor — size for 2x peak during rolling deploys. For 4-6K connections, set to 8000-12000
     ttlOverride: 300000           # 5min — broker closes stale connections (ASG terminations)
     ttlCheckInterval: 30000       # 30s — how often broker scans for dead connections
     tcpSendBufferSize: 1048576    # 1MB
