@@ -1,16 +1,16 @@
 # ActiveMQ Artemis Migration - Review Findings
 
 **Reviewed**: 2026-04-14  
-**Updated**: 2026-04-15  
-**Environment Context**: EKS 1.34, amd64/x86_64, us-east-2, 2 AZs, ~100 queues, PII data, large messages (PDFs)
+**Updated**: 2026-04-16  
+**Environment Context**: EKS 1.34, amd64/x86_64, us-east-2, 2 AZs, 152 queues, 4-6K connections, PII data, large messages (PDFs, 64MB max)
 
 ---
 
 ## Executive Summary
 
-**Green**: Architecture is sound. All 18 Helm templates implemented and rendering cleanly. broker.xml HA group assignment fixed (per-ordinal via init container). Test environment validated (32/33 pass). Performance benchmarked (77K msg/sec direct, sub-7ms p95 at app level).
+**Green**: Architecture is sound. All 18 Helm templates implemented and rendering cleanly. broker.xml HA group assignment fixed (per-ordinal via init container). Test environment validated (32/33 pass). Performance benchmarked (77K msg/sec direct, sub-7ms p95 at app level). **Broker tuning applied** for production workload profile (4-6K connections, 14KB avg messages, 64MB max DLQ). Monolith source scan completed — all client-side migration changes are backwards compatible with Classic.
 
-**Yellow**: Operational readiness gaps remain before production. ESO backend undecided, alerting rules not implemented, Grafana dashboard not built, runbooks incomplete.
+**Yellow**: Operational readiness gaps remain before production. ESO backend undecided, alerting rules not implemented, Grafana dashboard not built, runbooks incomplete. Client-side code changes needed (~3-5 weeks): JNDI removal, temp queue replacement, ObjectMessage allowlist, prefetch tuning.
 
 **Red**: No blockers for dev deployment. Prod blocked on ESO backend decision + cert-manager ClusterIssuer.
 
@@ -26,6 +26,79 @@ All items that previously blocked dev deployment have been resolved.
 - ~~1.4 JMX exporter config~~ — **DONE**. `configmap-jmx-exporter.yaml` implemented with Artemis JMX pattern rules.
 - ~~1.5 EC2 client connectivity~~ — **DONE**. NLB approach selected. `service-nlb.yaml` implemented, conditional on `broker.nlb.enabled`. Migration guide documents NLB DNS pattern.
 - ~~1.6 Namespace parameterization~~ — **DONE**. Templates use `{{ .Release.Namespace }}`.
+
+---
+
+## 1B. COMPLETED — Broker Tuning & Client Analysis (2026-04-16)
+
+### Production Workload Profile (from AMQ Classic stats)
+
+| Metric | Value |
+|---|---|
+| Queues | 152 |
+| Avg message size | 14 KB |
+| Max message size | 64 MB (DLQ) |
+| Total pending | 6.8 GB (DLQ/ARCHIVE/TEMP dominate) |
+| Queues >100KB messages | 12 (all DLQs) |
+| Concurrent connections | 4-6K throughout day |
+
+### Broker Tuning Applied (5 units, merged to main)
+
+| Setting | Was | Now (prod) | Why |
+|---|---|---|---|
+| `maxConnections` | 1000 | 8000 | 2x peak for rolling deploy headroom |
+| `threadPoolMaxSize` | 30 | 200 | Thread-per-connection at 4-6K |
+| `scheduledThreadPoolMaxSize` | 5 | 20 | Scheduled task throughput |
+| `journal-file-size` | 10MB | 128MB | Must exceed 64MB max DLQ message |
+| `journal-pool-files` | 20 | 50 | Larger files = more churn |
+| `journal-compact-min-files` | 10 | 5 | Trigger compaction sooner |
+| `connection-ttl-override` | 300000 | 350000 | Align with NLB 350s idle |
+| `connection-ttl-check-interval` | default | 10000 | Faster cleanup at high conn count |
+| JVM heap | 4g/2g | 6g/4g | Connection memory pressure |
+| Container limits | 8Gi | 10Gi | 1.67x heap headroom |
+| `global-max-size` | -1 (50%) | 3GB explicit | 50% of 6g heap |
+| NLB idle timeout | not set | 400s | Must exceed broker TTL |
+| DLQ `maxSizeBytes` | default | 4GB | DLQs hold 2.6GB+ |
+| DLQ `addressFullPolicy` | default | PAGE | DLQs should page, not block |
+| DLQ `expiryDelay` | none | 7 days | Prevent unbounded growth |
+| DLQ `maxDeliveryAttempts` | default | -1 | Don't re-DLQ DLQ messages |
+
+**Template fix**: `_helpers.tpl` — added `int64` casts for `maxSizeBytes`, `expiryDelay`, `redeliveryDelay`, `maxRedeliveryDelay` to prevent scientific notation rendering in broker.xml.
+
+### Monolith Source Scan Results (8,713 JMS matches across 695 files)
+
+Scan performed with `scripts/jms-source-scan.sh` against monolith source. Key findings:
+
+- **Zero jakarta.jms** — fully on Classic OpenWire, javax.jms only
+- **Zero @JmsListener** — all 65 listeners are raw MessageListener impls
+- **3,268 raw MessageProducer** uses (older code) + 773 JmsTemplate (newer)
+- **82 concurrency settings** — custom thread management, not Spring-managed
+- **29 AUTO_ACKNOWLEDGE** — fire-and-forget majority
+
+### Validated Migration Blockers (all backwards compatible with Classic)
+
+| Blocker | Matches | Fix | Backwards Compatible? |
+|---|---|---|---|
+| JNDI removal | 76 | Replace with Spring bean injection | Yes |
+| Temp queue replacement | 5 files, 849 patterns | Use named reply queues | Yes |
+| ObjectMessage allowlist | 10 | Broker-side config only | N/A (no code change) |
+| Prefetch tuning | 6 | Halve values in config | Yes |
+
+### False Positives Eliminated
+
+- **Blob/StreamMessage (23 matches)** — all DAO/JPA code, zero `javax.jms.StreamMessage` or `BlobMessage`
+- **Virtual topic (1 match)** — Liquibase changelog XML, not JMS
+
+### Connection Count Analysis (revised)
+
+Connection pooling IS present (24 matches, 16 pool size configs). The 4-6K connections are NOT from missing pooling. Root cause: 65 raw MessageListener impls + 82 concurrency settings = custom thread pools managing connections outside the pool. Each raw listener opens its own connection.
+
+**Action**: Run `amq-analyze.sh -c` against Classic before cutover to confirm per-IP distribution.
+
+### New Tooling Added
+
+- `scripts/jms-source-scan.sh` — 16-section JMS source analyzer with migration checklist generation
+- `scripts/amq-analyze.sh -c` — Connection distribution by client IP via Jolokia REST API (idle vs active breakdown)
 
 ---
 
@@ -485,15 +558,19 @@ These can wait until after successful prod deployment.
 
 ---
 
-### 5.3 Connection Management for ASG Producers (LOW)
+### 5.3 Connection Management for ASG Producers (MEDIUM)
 
-**Risk**: EC2 ASG producers terminate without cleanly closing connections. Broker holds stale connections for `ttl-override: 300000` (5 min). During rapid ASG scale-in, connection pool could exhaust.
+**Risk**: 4-6K concurrent connections from mix of monolith and microservices. Source scan confirmed pooling IS present but 65 raw MessageListener impls + 82 concurrency settings manage connections outside the pool. Each raw listener opens its own connection. ASG-terminated instances leave stale connections for `ttl-override: 350000` (5.8 min).
 
-**Why it matters**: New producers blocked, throughput drops.
+**Why it matters**: During rolling deploys, connection count can briefly double (old + new instances). At 4-6K steady state, that's 8-12K during deploy — within `maxConnections: 8000` headroom but tight.
 
-**Mitigation**: Plan sets `ttl-override` and `maxConnections: 1000`. Likely sufficient, but needs validation.
+**Mitigation**: `ttl-override: 350000`, `ttl-check-interval: 10000`, `maxConnections: 8000`. NLB idle timeout at 400s (above broker TTL).
 
-**Recommendation**: Load test ASG scale-in (e.g. 100 instances → 10 instances in 2 minutes) and confirm connection count doesn't exceed threshold.
+**Recommendation**: 
+- Run `amq-analyze.sh -c` against Classic to confirm per-IP connection distribution
+- Load test ASG scale-in (100 → 10 instances in 2 min) and confirm connections drain within TTL
+- Cross-reference high-connection IPs with monolith ASG vs microservice pods
+- Don't expect dramatic connection count reduction post-migration — raw JMS listener pattern won't change in Phase 1
 
 ---
 
@@ -527,6 +604,13 @@ Brokers are statically sized. The documented burst (~100K msg/hr = ~28 msg/sec) 
 | | ~~JMX exporter config~~ | ~~MEDIUM~~ | ~~S~~ | ~~Observability~~ |
 | | ~~EC2 client connectivity (NLB)~~ | ~~MEDIUM~~ | ~~S~~ | ~~Producer/consumer traffic~~ |
 | | ~~Namespace parameterization~~ | ~~LOW~~ | ~~S~~ | ~~Multi-env~~ |
+| | ~~Broker tuning (5 units)~~ | ~~CRITICAL~~ | ~~M~~ | ~~Prod sizing~~ |
+| | ~~Monolith source scan~~ | ~~HIGH~~ | ~~M~~ | ~~Migration planning~~ |
+| **Client Code** | JNDI removal (76 matches) | CRITICAL | L | Artemis compat |
+| | Temp queue replacement (849 patterns) | CRITICAL | L | Artemis compat |
+| | Prefetch tuning (6 configs) | MEDIUM | S | Performance |
+| | ObjectMessage allowlist | MEDIUM | S | Artemis compat |
+| | Connection distribution analysis | HIGH | S | Capacity planning |
 | **Pre-Prod** | ESO backend decision | CRITICAL | M | Prod secrets |
 | | cert-manager ClusterIssuer | HIGH | S | Prod TLS |
 | | PDB strategy | HIGH | S | Prod HA |
@@ -561,7 +645,19 @@ Brokers are statically sized. The documented burst (~100K msg/hr = ~28 msg/sec) 
 ### ~~Phase 1: Unblock Dev Deployment~~ — COMPLETE
 All Helm templates implemented, broker.xml HA fixed, StorageClass/JMX/NLB/namespace done. Ready for dev deploy.
 
-### Phase 2: Pre-Production Readiness (3 weeks)
+### ~~Phase 1B: Broker Tuning & Client Analysis~~ — COMPLETE
+Production workload profile validated. 5 tuning units applied (connections, journal, DLQ, JVM, NLB). Monolith scanned (8,713 JMS matches). 4 validated blockers identified, all backwards compatible. 2 false positives eliminated.
+
+### Phase 2: Client Code Compatibility (3-5 weeks, parallel with Phase 3)
+All changes deploy against Classic first, validate in prod, then Artemis cutover = broker URL change + ObjectMessage allowlist. No big bang.
+
+1. **JNDI removal** (76 matches) — replace with Spring bean injection (L)
+2. **Temp queue replacement** (5 files, 849 patterns) — use named reply queues (L)
+3. **Prefetch tuning** (6 configs) — halve values (S)
+4. **ObjectMessage allowlist** (10 uses) — broker-side config only, no code change (S)
+5. Run `amq-analyze.sh -c` against Classic — confirm connection distribution (S)
+
+### Phase 3: Pre-Production Readiness (3 weeks, parallel with Phase 2)
 1. **Decide ESO backend** (SSM recommended) and implement (M)
 2. Create IAM role for ESO service account (S)
 3. Create/configure cert-manager ClusterIssuer (S)
@@ -572,13 +668,14 @@ All Helm templates implemented, broker.xml HA fixed, StorageClass/JMX/NLB/namesp
 8. Write runbooks (L)
 9. Develop and execute load tests in staging (L)
 
-### Phase 3: Production Cutover (2 weeks)
+### Phase 4: Production Cutover (2 weeks)
 1. Document migration cutover plan (M)
-2. Execute cutover to prod (coordinate with teams)
-3. 2x peak load + 24-hour soak test
-4. Monitor for 1 week, iterate on alerts/dashboards
+2. Deploy client code changes against Classic, validate in prod (M)
+3. Artemis cutover = broker URL change + ObjectMessage allowlist (S)
+4. 2x peak load + 24-hour soak test
+5. Monitor for 1 week, iterate on alerts/dashboards
 
-### Phase 4: Day-2 Hardening (ongoing)
+### Phase 5: Day-2 Hardening (ongoing)
 1. DLQ per-queue monitoring (M)
 2. Large message cleanup policy (M)
 3. Backup/restore testing (L)
@@ -586,7 +683,7 @@ All Helm templates implemented, broker.xml HA fixed, StorageClass/JMX/NLB/namesp
 5. Connection leak detection (M)
 6. Journal compaction tuning (M)
 
-### Phase 5: Future Improvements (3-6 months post-launch)
+### Phase 6: Future Improvements (3-6 months post-launch)
 1. S3 claim check pattern (if PDF volume is high)
 2. Third AZ (if split-brain risk is unacceptable)
 3. Message expiry policies (once business SLAs are defined)
@@ -597,6 +694,9 @@ All Helm templates implemented, broker.xml HA fixed, StorageClass/JMX/NLB/namesp
 
 ```
 charts/artemis/templates/              # All 18 templates EXIST
+scripts/
+├── jms-source-scan.sh                 # DONE — monolith JMS analyzer
+└── amq-analyze.sh                     # DONE — JDBC store + connection analysis
 docs/
 ├── runbooks/
 │   ├── failover.md                    # PRE-PROD
@@ -615,10 +715,10 @@ monitoring/
 
 ## FINAL VERDICT
 
-**Overall Assessment**: Strong architectural foundation, all Helm templates implemented and rendering, broker.xml HA fixed. Primary remaining risk is operational readiness for prod.
+**Overall Assessment**: Strong architectural foundation, all Helm templates implemented and rendering, broker.xml HA fixed, broker tuned for production workload. Monolith source scan confirms all client-side migration changes are backwards compatible — deploy against Classic first, then Artemis cutover is a broker URL change + ObjectMessage allowlist. No big bang required.
 
-**Go/No-Go for Dev**: GO. All templates exist, render cleanly, init container resolves per-pod config.
+**Go/No-Go for Dev**: GO. All templates exist, render cleanly, init container resolves per-pod config, tuning applied.
 
-**Go/No-Go for Prod**: NO-GO until pre-production checklist complete (ESO, certs, load testing, runbooks, alerts).
+**Go/No-Go for Prod**: NO-GO until pre-production checklist complete (ESO, certs, load testing, runbooks, alerts) AND client code changes deployed against Classic (JNDI removal, temp queue replacement).
 
-**Estimated Timeline to Prod-Ready**: 5-7 weeks (3 weeks pre-prod + 2 weeks cutover/validation).
+**Estimated Timeline to Prod-Ready**: 6-8 weeks (3-5 weeks client code changes in parallel with 3 weeks pre-prod infra + 2 weeks cutover/validation). Client code is the long pole — JNDI removal (76 matches) and temp queue replacement (849 patterns across 5 files) are the largest work items.
