@@ -6,14 +6,18 @@ set -euo pipefail
 # listeners, producers, queue references, and transport settings.
 # Outputs a migration-ready report.
 
-# --- Colors ---
-BOLD="\033[1m"
-GREEN="\033[32m"
-YELLOW="\033[33m"
-CYAN="\033[36m"
-RED="\033[31m"
-DIM="\033[2m"
-RESET="\033[0m"
+# --- Colors (disabled when piped or --no-color) ---
+if [[ -t 1 && "${NO_COLOR:-}" == "" ]]; then
+    BOLD="\033[1m"
+    GREEN="\033[32m"
+    YELLOW="\033[33m"
+    CYAN="\033[36m"
+    RED="\033[31m"
+    DIM="\033[2m"
+    RESET="\033[0m"
+else
+    BOLD="" GREEN="" YELLOW="" CYAN="" RED="" DIM="" RESET=""
+fi
 
 usage() {
     cat <<EOF
@@ -27,6 +31,7 @@ Arguments:
 Options:
     -o, --output FILE        Write report to file (default: stdout only)
     -v, --verbose            Show matching file contents (not just locations)
+    --no-color               Disable colored output
     --help                   Show this help
 
 Examples:
@@ -45,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -o|--output) OUTPUT_FILE="$2"; shift 2 ;;
         -v|--verbose) VERBOSE=true; shift ;;
+        --no-color) NO_COLOR=1; BOLD="" GREEN="" YELLOW="" CYAN="" RED="" DIM="" RESET=""; shift ;;
         --help) usage ;;
         -*) echo "Unknown option: $1"; usage ;;
         *) SOURCE_ROOT="$1"; shift ;;
@@ -125,9 +131,11 @@ search_with_context() {
         count=$(echo "${results}" | wc -l | xargs)
         found_count=$((found_count + count))
         echo -e "  ${GREEN}✓${RESET} ${label}: ${BOLD}${count} match(es)${RESET}"
-        echo "${results}" | while read -r line; do
-            echo -e "    ${line#${SOURCE_ROOT}/}"
-        done
+        if [[ "${VERBOSE}" == "true" ]]; then
+            echo "${results}" | while read -r line; do
+                echo -e "    ${line#${SOURCE_ROOT}/}"
+            done
+        fi
         echo ""
     else
         echo -e "  ${DIM}○ ${label}: none found${RESET}"
@@ -193,10 +201,13 @@ POOL_SETTINGS=$(grep -rn --include="*.java" --include="*.xml" --include="*.prope
     -E "(maxConnections|setMaxConnections|maximumActiveSessionPerConnection|setMaxSessionsPerConnection|max-connections|maxSessions|pool\.max|pool\.size|idleTimeout|setIdleTimeout|connectionIdleTimeout)" \
     "${SOURCE_ROOT}" 2>/dev/null || true)
 if [[ -n "${POOL_SETTINGS}" ]]; then
-    echo -e "  ${GREEN}✓${RESET} Pool configuration found:"
-    echo "${POOL_SETTINGS}" | while read -r line; do
-        echo -e "    ${line#${SOURCE_ROOT}/}"
-    done
+    local_count=$(echo "${POOL_SETTINGS}" | wc -l | xargs)
+    echo -e "  ${GREEN}✓${RESET} Pool configuration found: ${BOLD}${local_count} match(es)${RESET}"
+    if [[ "${VERBOSE}" == "true" ]]; then
+        echo "${POOL_SETTINGS}" | while read -r line; do
+            echo -e "    ${line#${SOURCE_ROOT}/}"
+        done
+    fi
 else
     echo -e "  ${RED}✗ No connection pool configuration found${RESET}"
     echo -e "  ${YELLOW}⚠ This likely means each JMS operation opens a raw TCP connection — major connection leak source${RESET}"
@@ -211,20 +222,23 @@ subsection "Broker URL patterns"
 BROKER_URLS=$(grep -roh --include="*.java" --include="*.xml" --include="*.properties" --include="*.yml" --include="*.yaml" \
     -E "(tcp|ssl|failover|nio|auto)://[^\"' ,}]+" "${SOURCE_ROOT}" 2>/dev/null | sort -u || true)
 if [[ -n "${BROKER_URLS}" ]]; then
-    echo -e "  ${GREEN}✓${RESET} Broker URLs found:"
+    local_count=$(echo "${BROKER_URLS}" | wc -l | xargs)
+    echo -e "  ${GREEN}✓${RESET} Broker URLs found: ${BOLD}${local_count}${RESET}"
     echo "${BROKER_URLS}" | while read -r url; do
         echo -e "    ${BOLD}${url}${RESET}"
-        # Flag important transport params
-        if echo "${url}" | grep -q "wireFormat.maxFrameSize"; then
-            SIZE=$(echo "${url}" | grep -oP 'maxFrameSize=\K[0-9]+' || true)
-            [[ -n "${SIZE}" ]] && echo -e "      maxFrameSize: ${SIZE} bytes ($(( SIZE / 1048576 ))MB)"
-        fi
-        if echo "${url}" | grep -q "jms.prefetchPolicy"; then
-            echo -e "      ${YELLOW}⚠ Prefetch set in URL — note for Artemis migration${RESET}"
-        fi
-        if echo "${url}" | grep -q "wireFormat.maxInactivityDuration"; then
-            DUR=$(echo "${url}" | grep -oP 'maxInactivityDuration=\K[0-9]+' || true)
-            [[ -n "${DUR}" ]] && echo -e "      maxInactivityDuration: ${DUR}ms ($(( DUR / 1000 ))s)"
+        if [[ "${VERBOSE}" == "true" ]]; then
+            # Flag important transport params
+            if echo "${url}" | grep -q "wireFormat.maxFrameSize"; then
+                SIZE=$(echo "${url}" | sed -n 's/.*maxFrameSize=\([0-9]*\).*/\1/p' || true)
+                [[ -n "${SIZE}" ]] && echo -e "      maxFrameSize: ${SIZE} bytes ($(( SIZE / 1048576 ))MB)"
+            fi
+            if echo "${url}" | grep -q "jms.prefetchPolicy"; then
+                echo -e "      ${YELLOW}⚠ Prefetch set in URL — note for Artemis migration${RESET}"
+            fi
+            if echo "${url}" | grep -q "wireFormat.maxInactivityDuration"; then
+                DUR=$(echo "${url}" | sed -n 's/.*maxInactivityDuration=\([0-9]*\).*/\1/p' || true)
+                [[ -n "${DUR}" ]] && echo -e "      maxInactivityDuration: ${DUR}ms ($(( DUR / 1000 ))s)"
+            fi
         fi
     done
 else
@@ -261,10 +275,13 @@ subsection "Queue names (string literals and constants)"
 QUEUE_NAMES=$(grep -roh --include="*.java" --include="*.xml" --include="*.properties" --include="*.yml" --include="*.yaml" \
     -E '(queue://|"queue://)[^"]*"?|destination(-name)?[= :]+"?[A-Za-z0-9._-]+"?' "${SOURCE_ROOT}" 2>/dev/null | sort -u || true)
 if [[ -n "${QUEUE_NAMES}" ]]; then
-    echo -e "  ${GREEN}✓${RESET} Queue references found:"
-    echo "${QUEUE_NAMES}" | while read -r q; do
-        echo -e "    ${q}"
-    done
+    local_count=$(echo "${QUEUE_NAMES}" | wc -l | xargs)
+    echo -e "  ${GREEN}✓${RESET} Queue references found: ${BOLD}${local_count}${RESET}"
+    if [[ "${VERBOSE}" == "true" ]]; then
+        echo "${QUEUE_NAMES}" | while read -r q; do
+            echo -e "    ${q}"
+        done
+    fi
 else
     echo -e "  ${DIM}○ No explicit queue:// references (may use constants or @Value)${RESET}"
 fi
@@ -279,17 +296,20 @@ JMS_LISTENERS=$(grep -rn --include="*.java" -E '@JmsListener' "${SOURCE_ROOT}" 2
 if [[ -n "${JMS_LISTENERS}" ]]; then
     COUNT=$(echo "${JMS_LISTENERS}" | wc -l | xargs)
     echo -e "  ${GREEN}✓${RESET} @JmsListener annotations: ${BOLD}${COUNT}${RESET}"
-    echo "${JMS_LISTENERS}" | while read -r line; do
-        echo -e "    ${line#${SOURCE_ROOT}/}"
-    done
-    echo ""
 
-    # Extract destination names
-    DESTINATIONS=$(echo "${JMS_LISTENERS}" | grep -oP 'destination\s*=\s*"?\K[^",)]+' || true)
+    # Extract destination names — always show these (they're the key info)
+    DESTINATIONS=$(echo "${JMS_LISTENERS}" | sed -n 's/.*destination[[:space:]]*=[[:space:]]*"\{0,1\}\([^",)]*\).*/\1/p' || true)
     if [[ -n "${DESTINATIONS}" ]]; then
         echo -e "  Listener destinations:"
         echo "${DESTINATIONS}" | sort -u | while read -r dest; do
             echo -e "    ${BOLD}${dest}${RESET}"
+        done
+    fi
+
+    if [[ "${VERBOSE}" == "true" ]]; then
+        echo ""
+        echo "${JMS_LISTENERS}" | while read -r line; do
+            echo -e "    ${line#${SOURCE_ROOT}/}"
         done
     fi
 else
@@ -320,10 +340,13 @@ CONCURRENCY=$(grep -rn --include="*.java" --include="*.xml" --include="*.propert
     -E "(setConcurrency|concurrency|concurrent-consumers|maxConcurrentConsumers|jms\.listener\.concurrency)" \
     "${SOURCE_ROOT}" 2>/dev/null || true)
 if [[ -n "${CONCURRENCY}" ]]; then
-    echo -e "  ${GREEN}✓${RESET} Concurrency configuration:"
-    echo "${CONCURRENCY}" | while read -r line; do
-        echo -e "    ${line#${SOURCE_ROOT}/}"
-    done
+    local_count=$(echo "${CONCURRENCY}" | wc -l | xargs)
+    echo -e "  ${GREEN}✓${RESET} Concurrency configuration: ${BOLD}${local_count} match(es)${RESET}"
+    if [[ "${VERBOSE}" == "true" ]]; then
+        echo "${CONCURRENCY}" | while read -r line; do
+            echo -e "    ${line#${SOURCE_ROOT}/}"
+        done
+    fi
 else
     echo -e "  ${DIM}○ No explicit concurrency settings (defaults apply: usually 1 thread per listener)${RESET}"
 fi
@@ -345,10 +368,12 @@ SEND_PATTERNS=$(grep -rn --include="*.java" \
 if [[ -n "${SEND_PATTERNS}" ]]; then
     COUNT=$(echo "${SEND_PATTERNS}" | wc -l | xargs)
     echo -e "  ${GREEN}✓${RESET} Send operations: ${BOLD}${COUNT}${RESET}"
-    echo "${SEND_PATTERNS}" | head -30 | while read -r line; do
-        echo -e "    ${line#${SOURCE_ROOT}/}"
-    done
-    [[ ${COUNT} -gt 30 ]] && echo -e "    ${DIM}... and $((COUNT - 30)) more${RESET}"
+    if [[ "${VERBOSE}" == "true" ]]; then
+        echo "${SEND_PATTERNS}" | head -30 | while read -r line; do
+            echo -e "    ${line#${SOURCE_ROOT}/}"
+        done
+        [[ ${COUNT} -gt 30 ]] && echo -e "    ${DIM}... and $((COUNT - 30)) more${RESET}"
+    fi
 fi
 echo ""
 
